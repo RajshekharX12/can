@@ -21,62 +21,60 @@ CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
 
 SALE_URL = "https://fragment.com/numbers?filter=sale"
 SOLD_URL = "https://fragment.com/numbers?sort=ending&filter=sold"
+COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
 
 def fetch_prices():
-    """
-    Scrape live values:
-      - current floor TON & USD from SALE_URL
-      - last sold TON from SOLD_URL
-    Returns:
-      curr_ton_raw: str, e.g. "740 TON"
-      curr_ton_val: float, e.g. 740.0
-      usd_raw     : str, e.g. "~ $2,643"
-      usd_val     : float, e.g. 2643.0
-      sold_ton_val: float, e.g. 720.0
-    """
+    """Return (curr_ton_raw, curr_ton_val, usd_raw, usd_val, sold_ton_val)."""
     opts = Options()
     opts.add_argument("--headless")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1920,1080")
     opts.binary_location = CHROME_BINARY
 
-    service = Service(CHROMEDRIVER_PATH)
-    driver = webdriver.Chrome(service=service, options=opts)
+    driver = webdriver.Chrome(service=Service(CHROMEDRIVER_PATH), options=opts)
     wait = WebDriverWait(driver, 15)
-
     try:
-        # 1) current floor
+        # — Current floor TON & USD —
         driver.get(SALE_URL)
-        ton_elem = wait.until(EC.presence_of_element_located(
-            (By.XPATH, '(//div[contains(text(),"TON")])[1]')
-        ))
-        curr_ton_raw = ton_elem.text.strip()
-        curr_ton_val = float(curr_ton_raw.split()[0].replace(",", ""))
+        # TON
+        elems = driver.find_elements(By.XPATH, "//*[contains(text(),'TON')]")
+        if elems:
+            ton_text = elems[0].text
+            m = re.search(r"([\d,]+)\s*TON", ton_text, re.IGNORECASE)
+            curr_ton_raw = m.group(0).upper() if m else ton_text
+            curr_ton_val = float(m.group(1).replace(",", "")) if m else 0.0
+        else:
+            curr_ton_raw, curr_ton_val = "N/A", 0.0
 
-        usd_elem = driver.find_element(By.XPATH, '(//div[contains(text(),"~")])[1]')
-        usd_raw = usd_elem.text.strip()
-        m_usd = re.search(r'([\d,]+(?:\.\d+)?)', usd_raw)
-        usd_val = float(m_usd.group(1).replace(",", "")) if m_usd else 0.0
+        # USD
+        elems = driver.find_elements(By.XPATH, "//*[contains(text(),'~') and contains(text(),'$')]")
+        if elems:
+            usd_raw = elems[0].text.strip()
+            m = re.search(r"([\d,]+(?:\.\d+)?)", usd_raw)
+            usd_val = float(m.group(1).replace(",", "")) if m else 0.0
+        else:
+            usd_raw, usd_val = "N/A", 0.0
 
-        # 2) last sold
+        # — Last sold TON —
         driver.get(SOLD_URL)
-        sold_elem = wait.until(EC.presence_of_element_located(
-            (By.XPATH, '(//div[contains(text(),"TON")])[1]')
-        ))
-        sold_ton_val = float(sold_elem.text.split()[0].replace(",", ""))
+        elems = driver.find_elements(By.XPATH, "//*[contains(text(),'TON')]")
+        if elems:
+            sold_text = elems[0].text
+            m = re.search(r"([\d,]+)\s*TON", sold_text, re.IGNORECASE)
+            sold_ton_val = float(m.group(1).replace(",", "")) if m else 0.0
+        else:
+            sold_ton_val = 0.0
 
         return curr_ton_raw, curr_ton_val, usd_raw, usd_val, sold_ton_val
     finally:
         driver.quit()
 
-def convert_currency(amount: float, to: str) -> float:
-    """Convert USD→<to> using open.er-api.com free endpoint."""
+def fetch_ton_usdt_price() -> float:
+    """Fetch live TON/USDT price from CoinGecko."""
     try:
-        resp = requests.get("https://open.er-api.com/v6/latest/USD", timeout=5)
+        resp = requests.get(COINGECKO_URL, params={"ids":"toncoin","vs_currencies":"usdt"}, timeout=5)
         resp.raise_for_status()
-        rate = resp.json().get("rates", {}).get(to, 0.0)
-        return amount * rate if rate else 0.0
+        return float(resp.json().get("toncoin", {}).get("usdt", 0.0))
     except:
         return 0.0
 
@@ -84,18 +82,22 @@ async def floor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔍 Fetching price…")
     try:
         curr_ton_raw, curr_ton_val, usd_raw, usd_val, sold_ton_val = fetch_prices()
+        ton_usdt = fetch_ton_usdt_price()
 
-        diff_ton = curr_ton_val - sold_ton_val
-        pct = (diff_ton / sold_ton_val * 100) if sold_ton_val else 0.0
-        usd_per_ton = (usd_val / curr_ton_val) if curr_ton_val else 0.0
-        diff_usd = diff_ton * usd_per_ton
+        # compute change
+        detail = ""
+        if sold_ton_val > 0:
+            diff_ton = curr_ton_val - sold_ton_val
+            pct = diff_ton / sold_ton_val * 100
+            usd_per_ton = usd_val / curr_ton_val if curr_ton_val else 0.0
+            diff_usd = diff_ton * usd_per_ton
+            action = "Rise by" if diff_ton >= 0 else "Fall by"
+            detail = f"\n{action} {pct:+.2f}% ({diff_usd:+.2f} $)"
 
-        action = "Rise by" if diff_ton >= 0 else "Fall by"
         text = (
-            f"Current price of +888 number: {curr_ton_raw} ({usd_raw})\n"
-            f"{action} {pct:+.2f}% ({diff_usd:+.2f} $)"
+            f"Current price of +888 number: {curr_ton_raw} ({usd_raw}){detail}\n"
+            f"Live TON/USDT price: {ton_usdt:.4f} USDT"
         )
-
         await msg.edit_text(text)
     except Exception as e:
         await msg.edit_text(f"❌ Error: `{e}`")
@@ -103,34 +105,50 @@ async def floor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         curr_ton_raw, curr_ton_val, usd_raw, usd_val, sold_ton_val = fetch_prices()
+        ton_usdt = fetch_ton_usdt_price()
 
-        diff_ton = curr_ton_val - sold_ton_val
-        pct = (diff_ton / sold_ton_val * 100) if sold_ton_val else 0.0
-        usd_per_ton = (usd_val / curr_ton_val) if curr_ton_val else 0.0
-        diff_usd = diff_ton * usd_per_ton
+        # compute change
+        if sold_ton_val > 0:
+            diff_ton = curr_ton_val - sold_ton_val
+            pct = diff_ton / sold_ton_val * 100
+            usd_per_ton = usd_val / curr_ton_val if curr_ton_val else 0.0
+            diff_usd = diff_ton * usd_per_ton
+            action_en = "Rise by" if diff_ton >= 0 else "Fall by"
+            action_cn = "涨幅" if diff_ton >= 0 else "跌幅"
+            action_ru = "Рост" if diff_ton >= 0 else "Падение"
+        else:
+            pct = diff_usd = 0.0
+            action_en = action_cn = action_ru = ""
 
-        # convert USD values
-        cny_current = convert_currency(usd_val, "CNY")
-        rub_current = convert_currency(usd_val, "RUB")
-        diff_cny = convert_currency(diff_usd, "CNY")
-        diff_rub = convert_currency(diff_usd, "RUB")
+        # convert USD diffs to CNY/RUB
+        def conv(a, c):
+            try:
+                r = requests.get("https://open.er-api.com/v6/latest/USD", params={"symbols": c}, timeout=5)
+                r.raise_for_status()
+                rate = r.json().get("rates", {}).get(c, 0.0)
+                return a * rate if rate else 0.0
+            except:
+                return 0.0
 
-        action_en = "Rise by" if diff_ton >= 0 else "Fall by"
-        action_cn = "涨幅" if diff_ton >= 0 else "跌幅"
-        action_ru = "Рост" if diff_ton >= 0 else "Падение"
+        cny_cur = conv(usd_val, "CNY")
+        diff_cny = conv(diff_usd, "CNY")
+        rub_cur = conv(usd_val, "RUB")
+        diff_rub = conv(diff_usd, "RUB")
 
-        eng = (
-            f"Current price of +888 number: {curr_ton_raw} ({usd_raw})\n"
-            f"{action_en} {pct:+.2f}% ({diff_usd:+.2f} $)"
-        )
-        chi = (
-            f"+888号码的当前价格：{curr_ton_raw} (~ {cny_current:,.2f} 元)\n"
-            f"{action_cn}：{pct:+.2f}% ({diff_cny:+.2f} 元)"
-        )
-        rus = (
-            f"Текущая цена номера +888: {curr_ton_raw} (~ {rub_current:,.2f} ₽)\n"
-            f"{action_ru}: {pct:+.2f}% ({diff_rub:+.2f} ₽)"
-        )
+        eng = f"Current price of +888 number: {curr_ton_raw} ({usd_raw})"
+        if action_en:
+            eng += f"\n{action_en} {pct:+.2f}% ({diff_usd:+.2f} $)"
+        eng += f"\nLive TON/USDT price: {ton_usdt:.4f} USDT"
+
+        chi = f"+888号码的当前价格：{curr_ton_raw} (~ {cny_cur:,.2f} 元)"
+        if action_cn:
+            chi += f"\n{action_cn}：{pct:+.2f}% ({diff_cny:,.2f} 元)"
+        chi += f"\nTON/USDT 实时价格：{ton_usdt:.4f} USDT"
+
+        rus = f"Текущая цена номера +888: {curr_ton_raw} (~ {rub_cur:,.2f} ₽)"
+        if action_ru:
+            rus += f"\n{action_ru}: {pct:+.2f}% ({diff_rub:+.2f} ₽)"
+        rus += f"\nЦена TON/USDT: {ton_usdt:.4f} USDT"
 
         results = [
             InlineQueryResultArticle(
@@ -154,7 +172,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         await update.inline_query.answer(results, cache_time=0)
-    except:
+    except Exception as e:
         await update.inline_query.answer([], cache_time=0)
 
 if __name__ == "__main__":
@@ -166,6 +184,4 @@ if __name__ == "__main__":
     asyncio.get_event_loop().run_until_complete(
         app.bot.delete_webhook(drop_pending_updates=True)
     )
-
-    print("Bot started (polling)…")
     app.run_polling()
