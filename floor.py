@@ -3,7 +3,7 @@ from requests.exceptions import RequestsDependencyWarning
 warnings.filterwarnings("ignore", category=RequestsDependencyWarning)
 
 import os
-import requests
+import re
 import asyncio
 import uuid
 from selenium import webdriver
@@ -22,15 +22,13 @@ BOT_TOKEN         = os.getenv("BOT_TOKEN")
 CHROME_BINARY     = os.getenv("CHROME_BINARY",     "/usr/bin/chromium-browser")
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
 
-SALE_URL  = "https://fragment.com/numbers?filter=sale"
-SOLD_URL  = "https://fragment.com/numbers?sort=ending&filter=sold"
-COINGECKO = "https://api.coingecko.com/api/v3/simple/price"
+SALE_URL = "https://fragment.com/numbers?filter=sale"
+SOLD_URL = "https://fragment.com/numbers?sort=ending&filter=sold"
 
-def fetch_prices():
+def fetch_usd_prices():
     """
-    Returns:
-      sale_ton_val (float), sold_ton_val (float)
-    by clicking into the first +888 entry on sale and sold pages.
+    Clicks the first +888 on sale and sold pages, scrapes the USD sale price from each detail.
+    Returns: (current_usd: float, sold_usd: float)
     """
     opts = Options()
     opts.add_argument("--headless")
@@ -41,90 +39,73 @@ def fetch_prices():
     driver = webdriver.Chrome(service=Service(CHROMEDRIVER_PATH), options=opts)
     wait = WebDriverWait(driver, 15)
     try:
-        # 1) Sale page → click first listed number → scrape TON
+        # 1) Sale → first number → detail → USD
         driver.get(SALE_URL)
-        sale_link = wait.until(EC.element_to_be_clickable(
+        first_sale = wait.until(EC.element_to_be_clickable(
             (By.XPATH, '//a[contains(@href,"/number/888")]')
         ))
-        driver.get(sale_link.get_attribute("href"))
-        ton_elem = wait.until(EC.presence_of_element_located(
-            (By.XPATH, '//div[contains(text(),"TON")]')
+        driver.get(first_sale.get_attribute("href"))
+        price_elem = wait.until(EC.presence_of_element_located(
+            (By.XPATH, "//*[contains(text(),'~') and contains(text(),'$')]")
         ))
-        sale_ton_val = float(ton_elem.text.split()[0].replace(",", ""))
+        usd_raw = price_elem.text  # e.g. "~ $2,634"
+        m = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", usd_raw)
+        current_usd = float(m.group(1).replace(",", "")) if m else 0.0
 
-        # 2) Sold page → click first sold number → scrape TON
+        # 2) Sold → first sold → detail → USD
         driver.get(SOLD_URL)
-        sold_link = wait.until(EC.element_to_be_clickable(
+        first_sold = wait.until(EC.element_to_be_clickable(
             (By.XPATH, '//a[contains(@href,"/number/888")]')
         ))
-        driver.get(sold_link.get_attribute("href"))
-        ton_elem2 = wait.until(EC.presence_of_element_located(
-            (By.XPATH, '//div[contains(text(),"TON")]')
+        driver.get(first_sold.get_attribute("href"))
+        sold_elem = wait.until(EC.presence_of_element_located(
+            (By.XPATH, "//*[contains(text(),'~') and contains(text(),'$')]")
         ))
-        sold_ton_val = float(ton_elem2.text.split()[0].replace(",", ""))
+        sold_raw = sold_elem.text
+        m2 = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", sold_raw)
+        sold_usd = float(m2.group(1).replace(",", "")) if m2 else 0.0
 
-        return sale_ton_val, sold_ton_val
+        return current_usd, sold_usd
     finally:
         driver.quit()
-
-def get_ton_usd_rate() -> float:
-    """Fetch current TON→USDT rate from CoinGecko (USDT≈USD)."""
-    try:
-        r = requests.get(
-            COINGECKO,
-            params={"ids": "toncoin", "vs_currencies": "usdt"},
-            timeout=5
-        )
-        r.raise_for_status()
-        return float(r.json()["toncoin"]["usdt"])
-    except:
-        return 0.0
 
 async def floor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔍 Fetching floor price…")
     try:
-        sale_ton, sold_ton = fetch_prices()
-        rate = get_ton_usd_rate()
+        current_usd, sold_usd = fetch_usd_prices()
+        diff = current_usd - sold_usd
+        pct = (diff / sold_usd * 100) if sold_usd else 0.0
+        action = "Fall by" if diff < 0 else "Rise by"
 
-        sale_usd = sale_ton * rate
-        sold_usd = sold_ton * rate
-
-        diff_usd = sale_usd - sold_usd
-        pct = (diff_usd / sold_usd * 100) if sold_usd else 0.0
-        action = "Fall by" if diff_usd < 0 else "Rise by"
-
-        text = f"Current price of +888 number: ~ ${sale_usd:,.0f}"
+        text = f"Current price of +888 number: ~ ${current_usd:,.0f}"
         if sold_usd:
-            text += f"\n{action} {pct:+.2f}% ({diff_usd:+.2f} $)"
+            text += f"\n{action} {pct:+.2f}% ({diff:+.2f} $)"
+
         await msg.edit_text(text)
     except Exception as e:
         await msg.edit_text(f"❌ Error: `{e}`")
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        sale_ton, sold_ton = fetch_prices()
-        rate = get_ton_usd_rate()
+        current_usd, sold_usd = fetch_usd_prices()
+        diff = current_usd - sold_usd
+        pct = (diff / sold_usd * 100) if sold_usd else 0.0
 
-        sale_usd = sale_ton * rate
-        sold_usd = sold_ton * rate
-        diff_usd = sale_usd - sold_usd
-        pct = (diff_usd / sold_usd * 100) if sold_usd else 0.0
+        action_en = "Fall by" if diff < 0 else "Rise by"
+        action_cn = "跌幅"  if diff < 0 else "涨幅"
+        action_ru = "Падение" if diff < 0 else "Рост"
 
-        action_en = "Fall by" if diff_usd < 0 else "Rise by"
-        action_cn = "跌幅"  if diff_usd < 0 else "涨幅"
-        action_ru = "Падение" if diff_usd < 0 else "Рост"
-
-        eng = f"Current price of +888 number: ~ ${sale_usd:,.0f}"
+        eng = f"Current price of +888 number: ~ ${current_usd:,.0f}"
         if sold_usd:
-            eng += f"\n{action_en} {pct:+.2f}% ({diff_usd:+.2f} $)"
+            eng += f"\n{action_en} {pct:+.2f}% ({diff:+.2f} $)"
 
-        chi = f"+888号码的当前价格：~ ${sale_usd:,.0f}"
+        chi = f"+888号码的当前价格：~ ${current_usd:,.0f}"
         if sold_usd:
-            chi += f"\n{action_cn}：{pct:+.2f}% ({diff_usd:+.2f} $)"
+            chi += f"\n{action_cn}：{pct:+.2f}% ({diff:+.2f} $)"
 
-        rus = f"Текущая цена номера +888: ~ ${sale_usd:,.0f}"
+        rus = f"Текущая цена номера +888: ~ ${current_usd:,.0f}"
         if sold_usd:
-            rus += f"\n{action_ru}: {pct:+.2f}% ({diff_usd:+.2f} $)"
+            rus += f"\n{action_ru}: {pct:+.2f}% ({diff:+.2f} $)"
 
         results = [
             InlineQueryResultArticle(
@@ -156,9 +137,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("floor", floor_cmd))
     app.add_handler(InlineQueryHandler(inline_query))
 
-    # ensure clean start
+    # clean start
     asyncio.get_event_loop().run_until_complete(
         app.bot.delete_webhook(drop_pending_updates=True)
     )
     app.run_polling()
-
