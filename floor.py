@@ -12,12 +12,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 from telegram import Update, InlineQueryResultArticle, InputTextMessageContent
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    InlineQueryHandler,
-    ContextTypes,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, InlineQueryHandler, ContextTypes
 from dotenv import load_dotenv
 
 # ─── Configuration ────────────────────────────────────────────────────────────
@@ -38,46 +33,51 @@ def create_driver():
 
 def fetch_current_price():
     """
-    Returns:
-      raw_usd (str): e.g. "~ $2,589"
-      usd_val (float)
+    Scrape the first +888 sale detail page for the USD floor price.
+    Returns (raw_text, numeric_usd).
     """
     driver = create_driver()
     wait = WebDriverWait(driver, 10)
     try:
-        # 1) go to sale listing and click first +888
         driver.get(SALE_LIST_URL)
         link = wait.until(EC.element_to_be_clickable(
             (By.XPATH, '//a[contains(@href,"/number/888")]')
         ))
         driver.get(link.get_attribute("href"))
 
-        # 2) scrape "~ $X,XXX"
         elem = wait.until(EC.presence_of_element_located(
             (By.XPATH, '//*[contains(text(),"~") and contains(text(),"$")]')
         ))
-        raw = elem.text.replace("\n", " ").strip()
+        raw = elem.text.replace("\n"," ").strip()           # e.g. "~ $2,589"
         m = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", raw)
-        val = float(m.group(1).replace(",", "")) if m else 0.0
+        val = float(m.group(1).replace(",","")) if m else 0.0
         return raw, val
     finally:
         driver.quit()
 
 def fetch_fx_rates():
     """
-    Fetch USD→CNY and USD→RUB rates.
-    Returns:
-      (rate_cny, rate_rub)
+    Use exchangerate.host /convert to get USD→CNY and USD→RUB rates.
+    Returns (rate_cny, rate_rub).
     """
     try:
-        resp = requests.get(
-            "https://api.exchangerate.host/latest",
-            params={"base": "USD", "symbols": "CNY,RUB"},
+        r1 = requests.get(
+            "https://api.exchangerate.host/convert",
+            params={"from":"USD","to":"CNY","amount":1},
             timeout=5
         )
-        resp.raise_for_status()
-        r = resp.json().get("rates", {})
-        return r.get("CNY", 0.0), r.get("RUB", 0.0)
+        r1.raise_for_status()
+        rate_cny = r1.json().get("result", 0.0)
+
+        r2 = requests.get(
+            "https://api.exchangerate.host/convert",
+            params={"from":"USD","to":"RUB","amount":1},
+            timeout=5
+        )
+        r2.raise_for_status()
+        rate_rub = r2.json().get("result", 0.0)
+
+        return rate_cny, rate_rub
     except:
         return 0.0, 0.0
 
@@ -86,25 +86,34 @@ async def floor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔍 Fetching price…")
     raw, usd = fetch_current_price()
     rate_cny, rate_rub = fetch_fx_rates()
+
     cny = usd * rate_cny
     rub = usd * rate_rub
 
+    # guard zero-rate
+    cny_text = f"≈ {cny:,.2f} 元" if rate_cny else "≈ N/A"
+    rub_text = f"≈ {rub:,.2f} ₽" if rate_rub else "≈ N/A"
+
     text = (
         f"Current price of +888 number: ({raw})\n"
-        f"≈ {cny:,.2f} 元\n"
-        f"≈ {rub:,.2f} ₽"
+        f"{cny_text}\n"
+        f"{rub_text}"
     )
     await msg.edit_text(text)
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw, usd = fetch_current_price()
     rate_cny, rate_rub = fetch_fx_rates()
+
     cny = usd * rate_cny
     rub = usd * rate_rub
 
-    eng = f"Current price of +888 number: ({raw})\n≈ {cny:,.2f} CNY ≈ {rub:,.2f} RUB"
-    chi = f"+888号码的当前价格：({raw})\n≈ {cny:,.2f} 元 ≈ {rub:,.2f} ₽"
-    rus = f"Текущая цена номера +888: ({raw})\n≈ {rub:,.2f} ₽ ≈ {cny:,.2f} 元"
+    cny_text = f"≈ {cny:,.2f} 元" if rate_cny else "≈ N/A"
+    rub_text = f"≈ {rub:,.2f} ₽" if rate_rub else "≈ N/A"
+
+    eng = f"Current price of +888 number: ({raw})\n{cny_text}  {rub_text}"
+    chi = f"+888号码的当前价格：({raw})\n{cny_text}  {rub_text}"
+    rus = f"Текущая цена номера +888: ({raw})\n{rub_text}  {cny_text}"
 
     results = [
         InlineQueryResultArticle(
