@@ -1,3 +1,7 @@
+import warnings
+from requests.exceptions import RequestsDependencyWarning
+warnings.filterwarnings("ignore", category=RequestsDependencyWarning)
+
 import os
 import re
 import requests
@@ -36,7 +40,6 @@ def fetch_prices():
     try:
         # — Current floor TON & USD —
         driver.get(SALE_URL)
-        # TON
         elems = driver.find_elements(By.XPATH, "//*[contains(text(),'TON')]")
         if elems:
             ton_text = elems[0].text
@@ -46,7 +49,6 @@ def fetch_prices():
         else:
             curr_ton_raw, curr_ton_val = "N/A", 0.0
 
-        # USD
         elems = driver.find_elements(By.XPATH, "//*[contains(text(),'~') and contains(text(),'$')]")
         if elems:
             usd_raw = elems[0].text.strip()
@@ -84,7 +86,6 @@ async def floor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         curr_ton_raw, curr_ton_val, usd_raw, usd_val, sold_ton_val = fetch_prices()
         ton_usdt = fetch_ton_usdt_price()
 
-        # compute change
         detail = ""
         if sold_ton_val > 0:
             diff_ton = curr_ton_val - sold_ton_val
@@ -107,7 +108,6 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         curr_ton_raw, curr_ton_val, usd_raw, usd_val, sold_ton_val = fetch_prices()
         ton_usdt = fetch_ton_usdt_price()
 
-        # compute change
         if sold_ton_val > 0:
             diff_ton = curr_ton_val - sold_ton_val
             pct = diff_ton / sold_ton_val * 100
@@ -117,10 +117,9 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             action_cn = "涨幅" if diff_ton >= 0 else "跌幅"
             action_ru = "Рост" if diff_ton >= 0 else "Падение"
         else:
-            pct = diff_usd = 0.0
+            pct = diff_usdt = 0.0
             action_en = action_cn = action_ru = ""
 
-        # convert USD diffs to CNY/RUB
         def conv(a, c):
             try:
                 r = requests.get("https://open.er-api.com/v6/latest/USD", params={"symbols": c}, timeout=5)
@@ -133,7 +132,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cny_cur = conv(usd_val, "CNY")
         diff_cny = conv(diff_usd, "CNY")
         rub_cur = conv(usd_val, "RUB")
-        diff_rub = conv(diff_usd, "RUB")
+        diff_rub = conv(diff_usdt, "RUB")
 
         eng = f"Current price of +888 number: {curr_ton_raw} ({usd_raw})"
         if action_en:
@@ -172,7 +171,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         await update.inline_query.answer(results, cache_time=0)
-    except Exception as e:
+    except:
         await update.inline_query.answer([], cache_time=0)
 
 if __name__ == "__main__":
