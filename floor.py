@@ -3,17 +3,24 @@ import re
 import asyncio
 import uuid
 import requests
+
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
 from telegram import Update, InlineQueryResultArticle, InputTextMessageContent
-from telegram.ext import ApplicationBuilder, CommandHandler, InlineQueryHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    InlineQueryHandler,
+    ContextTypes,
+)
 from dotenv import load_dotenv
 
-# ─── Configuration ───────────────────────────────────────────────────────────
+# ─── Configuration ────────────────────────────────────────────────────────────
 load_dotenv()
 BOT_TOKEN         = os.getenv("BOT_TOKEN")
 CHROME_BINARY     = os.getenv("CHROME_BINARY",     "/usr/bin/chromium-browser")
@@ -31,23 +38,26 @@ def create_driver():
 
 def fetch_current_price():
     """
-    Scrape the first +888 sale detail page for the USD floor price.
-    Returns (raw_text, numeric_value).
+    Returns:
+      raw_usd (str): e.g. "~ $2,589"
+      usd_val (float)
     """
     driver = create_driver()
     wait = WebDriverWait(driver, 10)
     try:
+        # 1) go to sale listing and click first +888
         driver.get(SALE_LIST_URL)
         link = wait.until(EC.element_to_be_clickable(
             (By.XPATH, '//a[contains(@href,"/number/888")]')
         ))
         driver.get(link.get_attribute("href"))
 
+        # 2) scrape "~ $X,XXX"
         elem = wait.until(EC.presence_of_element_located(
             (By.XPATH, '//*[contains(text(),"~") and contains(text(),"$")]')
         ))
-        raw = elem.text.replace("\n", " ").strip()        # e.g. "~ $2,589"
-        m = re.search(r"\$\s*([\d,]+)", raw)
+        raw = elem.text.replace("\n", " ").strip()
+        m = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", raw)
         val = float(m.group(1).replace(",", "")) if m else 0.0
         return raw, val
     finally:
@@ -55,8 +65,9 @@ def fetch_current_price():
 
 def fetch_fx_rates():
     """
-    Fetch latest USD→CNY and USD→RUB rates from exchangerate.host.
-    Returns (rate_cny, rate_rub).
+    Fetch USD→CNY and USD→RUB rates.
+    Returns:
+      (rate_cny, rate_rub)
     """
     try:
         resp = requests.get(
@@ -65,8 +76,8 @@ def fetch_fx_rates():
             timeout=5
         )
         resp.raise_for_status()
-        rates = resp.json().get("rates", {})
-        return rates.get("CNY", 0.0), rates.get("RUB", 0.0)
+        r = resp.json().get("rates", {})
+        return r.get("CNY", 0.0), r.get("RUB", 0.0)
     except:
         return 0.0, 0.0
 
@@ -75,7 +86,6 @@ async def floor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔍 Fetching price…")
     raw, usd = fetch_current_price()
     rate_cny, rate_rub = fetch_fx_rates()
-
     cny = usd * rate_cny
     rub = usd * rate_rub
 
@@ -89,26 +99,31 @@ async def floor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw, usd = fetch_current_price()
     rate_cny, rate_rub = fetch_fx_rates()
-
     cny = usd * rate_cny
     rub = usd * rate_rub
 
-    eng = f"Current price of +888 number: ({raw})"
-    chi = f"+888号码的当前价格：({raw})\n≈ {cny:,.2f} 元"
-    rus = f"Текущая цена номера +888: ({raw})\n≈ {rub:,.2f} ₽"
+    eng = f"Current price of +888 number: ({raw})\n≈ {cny:,.2f} CNY ≈ {rub:,.2f} RUB"
+    chi = f"+888号码的当前价格：({raw})\n≈ {cny:,.2f} 元 ≈ {rub:,.2f} ₽"
+    rus = f"Текущая цена номера +888: ({raw})\n≈ {rub:,.2f} ₽ ≈ {cny:,.2f} 元"
 
     results = [
         InlineQueryResultArticle(
-            id=uuid.uuid4().hex, title="🇺🇸 English",
-            description=eng, input_message_content=InputTextMessageContent(eng)
+            id=uuid.uuid4().hex,
+            title="🇺🇸 English",
+            description=eng,
+            input_message_content=InputTextMessageContent(eng),
         ),
         InlineQueryResultArticle(
-            id=uuid.uuid4().hex, title="🇨🇳 中文",
-            description=chi, input_message_content=InputTextMessageContent(chi)
+            id=uuid.uuid4().hex,
+            title="🇨🇳 中文",
+            description=chi,
+            input_message_content=InputTextMessageContent(chi),
         ),
         InlineQueryResultArticle(
-            id=uuid.uuid4().hex, title="🇷🇺 Русский",
-            description=rus, input_message_content=InputTextMessageContent(rus)
+            id=uuid.uuid4().hex,
+            title="🇷🇺 Русский",
+            description=rus,
+            input_message_content=InputTextMessageContent(rus),
         ),
     ]
     await update.inline_query.answer(results, cache_time=0)
@@ -118,7 +133,6 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("floor", floor_cmd))
     app.add_handler(InlineQueryHandler(inline_query))
-
     asyncio.get_event_loop().run_until_complete(
         app.bot.delete_webhook(drop_pending_updates=True)
     )
