@@ -3,7 +3,6 @@ from requests.exceptions import RequestsDependencyWarning
 warnings.filterwarnings("ignore", category=RequestsDependencyWarning)
 
 import os
-import re
 import requests
 import asyncio
 import uuid
@@ -23,12 +22,16 @@ BOT_TOKEN         = os.getenv("BOT_TOKEN")
 CHROME_BINARY     = os.getenv("CHROME_BINARY",     "/usr/bin/chromium-browser")
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
 
-SALE_URL = "https://fragment.com/numbers?filter=sale"
-SOLD_URL = "https://fragment.com/numbers?sort=ending&filter=sold"
+SALE_URL  = "https://fragment.com/numbers?filter=sale"
+SOLD_URL  = "https://fragment.com/numbers?sort=ending&filter=sold"
 COINGECKO = "https://api.coingecko.com/api/v3/simple/price"
 
 def fetch_prices():
-    """Click first sale & sold, scrape TON from detail pages."""
+    """
+    Returns:
+      sale_ton_val (float), sold_ton_val (float)
+    by clicking into the first +888 entry on sale and sold pages.
+    """
     opts = Options()
     opts.add_argument("--headless")
     opts.add_argument("--no-sandbox")
@@ -38,37 +41,40 @@ def fetch_prices():
     driver = webdriver.Chrome(service=Service(CHROMEDRIVER_PATH), options=opts)
     wait = WebDriverWait(driver, 15)
     try:
-        # 1) Sale page → first number → detail
+        # 1) Sale page → click first listed number → scrape TON
         driver.get(SALE_URL)
-        first_sale = wait.until(EC.element_to_be_clickable(
+        sale_link = wait.until(EC.element_to_be_clickable(
             (By.XPATH, '//a[contains(@href,"/number/888")]')
         ))
-        driver.get(first_sale.get_attribute("href"))
-        # scrape TON price text like "740 TON"
-        sale_ton_text = wait.until(EC.presence_of_element_located(
+        driver.get(sale_link.get_attribute("href"))
+        ton_elem = wait.until(EC.presence_of_element_located(
             (By.XPATH, '//div[contains(text(),"TON")]')
-        )).text
-        sale_ton = float(re.search(r"([\d,]+)", sale_ton_text).group(1).replace(",", ""))
+        ))
+        sale_ton_val = float(ton_elem.text.split()[0].replace(",", ""))
 
-        # 2) Sold page → first sold number → detail
+        # 2) Sold page → click first sold number → scrape TON
         driver.get(SOLD_URL)
-        first_sold = wait.until(EC.element_to_be_clickable(
+        sold_link = wait.until(EC.element_to_be_clickable(
             (By.XPATH, '//a[contains(@href,"/number/888")]')
         ))
-        driver.get(first_sold.get_attribute("href"))
-        sold_ton_text = wait.until(EC.presence_of_element_located(
+        driver.get(sold_link.get_attribute("href"))
+        ton_elem2 = wait.until(EC.presence_of_element_located(
             (By.XPATH, '//div[contains(text(),"TON")]')
-        )).text
-        sold_ton = float(re.search(r"([\d,]+)", sold_ton_text).group(1).replace(",", ""))
+        ))
+        sold_ton_val = float(ton_elem2.text.split()[0].replace(",", ""))
 
-        return sale_ton, sold_ton
+        return sale_ton_val, sold_ton_val
     finally:
         driver.quit()
 
 def get_ton_usd_rate() -> float:
-    """Fetch live TON→USDT rate (USDT≈USD)."""
+    """Fetch current TON→USDT rate from CoinGecko (USDT≈USD)."""
     try:
-        r = requests.get(COINGECKO, params={"ids":"toncoin","vs_currencies":"usdt"}, timeout=5)
+        r = requests.get(
+            COINGECKO,
+            params={"ids": "toncoin", "vs_currencies": "usdt"},
+            timeout=5
+        )
         r.raise_for_status()
         return float(r.json()["toncoin"]["usdt"])
     except:
@@ -83,14 +89,13 @@ async def floor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sale_usd = sale_ton * rate
         sold_usd = sold_ton * rate
 
-        diff = sale_usd - sold_usd
-        pct = (diff / sold_usd * 100) if sold_usd else 0.0
-        action = "Fall by" if diff < 0 else "Rise by"
+        diff_usd = sale_usd - sold_usd
+        pct = (diff_usd / sold_usd * 100) if sold_usd else 0.0
+        action = "Fall by" if diff_usd < 0 else "Rise by"
 
         text = f"Current price of +888 number: ~ ${sale_usd:,.0f}"
         if sold_usd:
-            text += f"\n{action} {pct:+.2f}% ({diff:+.2f} $)"
-
+            text += f"\n{action} {pct:+.2f}% ({diff_usd:+.2f} $)"
         await msg.edit_text(text)
     except Exception as e:
         await msg.edit_text(f"❌ Error: `{e}`")
@@ -102,24 +107,24 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         sale_usd = sale_ton * rate
         sold_usd = sold_ton * rate
-        diff = sale_usd - sold_usd
-        pct = (diff / sold_usd * 100) if sold_usd else 0.0
+        diff_usd = sale_usd - sold_usd
+        pct = (diff_usd / sold_usd * 100) if sold_usd else 0.0
 
-        action_en = "Fall by" if diff < 0 else "Rise by"
-        action_cn = "跌幅"  if diff < 0 else "涨幅"
-        action_ru = "Падение" if diff < 0 else "Рост"
+        action_en = "Fall by" if diff_usd < 0 else "Rise by"
+        action_cn = "跌幅"  if diff_usd < 0 else "涨幅"
+        action_ru = "Падение" if diff_usd < 0 else "Рост"
 
         eng = f"Current price of +888 number: ~ ${sale_usd:,.0f}"
         if sold_usd:
-            eng += f"\n{action_en} {pct:+.2f}% ({diff:+.2f} $)"
+            eng += f"\n{action_en} {pct:+.2f}% ({diff_usd:+.2f} $)"
 
         chi = f"+888号码的当前价格：~ ${sale_usd:,.0f}"
         if sold_usd:
-            chi += f"\n{action_cn}：{pct:+.2f}% ({diff:+.2f} $)"
+            chi += f"\n{action_cn}：{pct:+.2f}% ({diff_usd:+.2f} $)"
 
         rus = f"Текущая цена номера +888: ~ ${sale_usd:,.0f}"
         if sold_usd:
-            rus += f"\n{action_ru}: {pct:+.2f}% ({diff:+.2f} $)"
+            rus += f"\n{action_ru}: {pct:+.2f}% ({diff_usd:+.2f} $)"
 
         results = [
             InlineQueryResultArticle(
@@ -151,9 +156,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("floor", floor_cmd))
     app.add_handler(InlineQueryHandler(inline_query))
 
-    # clean start
+    # ensure clean start
     asyncio.get_event_loop().run_until_complete(
         app.bot.delete_webhook(drop_pending_updates=True)
     )
-    print("Bot started.")
     app.run_polling()
+
