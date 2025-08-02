@@ -16,8 +16,8 @@ from telegram import Update, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import ApplicationBuilder, CommandHandler, InlineQueryHandler, ContextTypes
 from dotenv import load_dotenv
 
+# Load environment
 load_dotenv()
-
 BOT_TOKEN         = os.getenv("BOT_TOKEN")
 CHROME_BINARY     = os.getenv("CHROME_BINARY",     "/usr/bin/chromium-browser")
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
@@ -27,45 +27,44 @@ SOLD_URL = "https://fragment.com/numbers?sort=ending&filter=sold"
 
 def fetch_usd_prices():
     """
-    Clicks the first +888 on sale and sold pages, scrapes the USD price from each detail.
-    Returns: (current_usd: float, sold_usd: float)
+    Clicks into the first for-sale and first sold +888 detail pages,
+    scrapes the USD price from each, and returns (current_usd, sold_usd).
     """
-    opts = Options()
-    opts.add_argument("--headless")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.binary_location = CHROME_BINARY
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.binary_location = CHROME_BINARY
 
-    driver = webdriver.Chrome(service=Service(CHROMEDRIVER_PATH), options=opts)
+    driver = webdriver.Chrome(service=Service(CHROMEDRIVER_PATH), options=options)
     wait = WebDriverWait(driver, 15)
     try:
-        # 1) Sale → detail
+        # -- Current --
         driver.get(SALE_URL)
         sale_link = wait.until(EC.element_to_be_clickable(
             (By.XPATH, '//a[contains(@href,"/number/888")]')
         ))
         driver.get(sale_link.get_attribute("href"))
-        sale_price_elem = wait.until(EC.presence_of_element_located(
+        sale_price = wait.until(EC.presence_of_element_located(
             (By.XPATH, "//*[contains(text(),'~') and contains(text(),'$')]")
-        ))
-        sale_txt = sale_price_elem.text
-        m1 = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", sale_txt)
-        current_usd = float(m1.group(1).replace(",", "")) if m1 else 0.0
+        )).text
+        m = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", sale_price)
+        current_usd = float(m.group(1).replace(",", "")) if m else 0.0
 
-        # 2) Sold → detail
+        # -- Last Sold --
         driver.get(SOLD_URL)
         sold_link = wait.until(EC.element_to_be_clickable(
             (By.XPATH, '//a[contains(@href,"/number/888")]')
         ))
         driver.get(sold_link.get_attribute("href"))
-        sold_price_elem = wait.until(EC.presence_of_element_located(
+        sold_price = wait.until(EC.presence_of_element_located(
             (By.XPATH, "//*[contains(text(),'~') and contains(text(),'$')]")
-        ))
-        sold_txt = sold_price_elem.text
-        m2 = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", sold_txt)
+        )).text
+        m2 = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", sold_price)
         sold_usd = float(m2.group(1).replace(",", "")) if m2 else 0.0
 
         return current_usd, sold_usd
+
     finally:
         driver.quit()
 
@@ -73,10 +72,12 @@ async def floor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔍 Fetching floor price…")
     try:
         current_usd, sold_usd = fetch_usd_prices()
+        # compute difference
         diff = current_usd - sold_usd
         pct = (diff / sold_usd * 100) if sold_usd else 0.0
         action = "Fall by" if diff < 0 else "Rise by"
 
+        # build output
         text = f"Current price of +888 number: ~ ${current_usd:,.0f}"
         if sold_usd:
             text += f"\n{action} {pct:+.2f}% ({diff:+.2f} $)"
@@ -136,6 +137,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("floor", floor_cmd))
     app.add_handler(InlineQueryHandler(inline_query))
 
+    # clean start
     asyncio.get_event_loop().run_until_complete(
         app.bot.delete_webhook(drop_pending_updates=True)
     )
