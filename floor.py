@@ -1,6 +1,8 @@
 import os
 import re
 import requests
+import asyncio
+import uuid
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -20,36 +22,40 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from dotenv import load_dotenv
-import uuid
 
-load_dotenv()
+load_dotenv()  # loads BOT_TOKEN, optional overrides
+
 BOT_TOKEN         = os.getenv("BOT_TOKEN")
 CHROME_BINARY     = os.getenv("CHROME_BINARY",     "/usr/bin/chromium-browser")
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
 
 def fetch_usd_price() -> str:
     """Scrape fragment.com and return the USD price string, e.g. '~ $2,643'."""
-    opts = Options()
-    opts.add_argument("--headless")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.binary_location = CHROME_BINARY
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--window-size=1920,1080")
+    options.binary_location = CHROME_BINARY
 
     service = Service(CHROMEDRIVER_PATH)
-    driver = webdriver.Chrome(service=service, options=opts)
+    driver = webdriver.Chrome(service=service, options=options)
     wait = WebDriverWait(driver, 15)
     try:
+        # 1) Load floor list and click first +888 item
         driver.get("https://fragment.com/numbers?filter=sale")
         link = wait.until(EC.presence_of_element_located(
             (By.XPATH, '//a[contains(@href,"/number/888")]')
         ))
         detail_url = link.get_attribute("href")
 
+        # 2) Go to detail page
         driver.get(detail_url)
         wait.until(EC.presence_of_element_located(
             (By.XPATH, '//*[contains(text(),"$")]')
         ))
 
+        # 3) Scan for the element containing "~ $"
         for el in driver.find_elements(By.XPATH, '//*[contains(text(),"$")]'):
             txt = el.text.replace("\n", " ").strip()
             if "~" in txt:
@@ -59,8 +65,8 @@ def fetch_usd_price() -> str:
         driver.quit()
 
 def convert_currency(amount: float, to: str) -> float:
-    """Try the /latest endpoint first, then fall back to /convert."""
-    # 1) /latest
+    """Try /latest first; if rate==0, fall back to /convert."""
+    # 1) latest rates
     try:
         resp = requests.get(
             "https://api.exchangerate.host/latest",
@@ -69,12 +75,12 @@ def convert_currency(amount: float, to: str) -> float:
         )
         resp.raise_for_status()
         rate = resp.json().get("rates", {}).get(to, 0.0)
-        if rate and rate > 0:
+        if rate > 0:
             return amount * rate
     except Exception:
         pass
 
-    # 2) fallback /convert
+    # 2) fallback convert endpoint
     try:
         resp = requests.get(
             "https://api.exchangerate.host/convert",
@@ -96,39 +102,36 @@ async def floor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        usd_raw = fetch_usd_price()  # "~ $2,643"
-        m = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", usd_raw)
-        amt = float(m.group(1).replace(",", "")) if m else 0.0
+        usd_raw = fetch_usd_price()
+        match = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", usd_raw)
+        amt = float(match.group(1).replace(",", "")) if match else 0.0
 
-        # Real-time conversions
+        # real-time conversions
         cny = convert_currency(amt, "CNY")
         rub = convert_currency(amt, "RUB")
 
-        results = []
-        # USD
-        results.append(InlineQueryResultArticle(
-            id=uuid.uuid4().hex,
-            title="USD Price",
-            description=usd_raw,
-            input_message_content=InputTextMessageContent(f"price 💵 : {usd_raw}")
-        ))
-        # CNY
-        cny_text = f"价格：{cny:,.2f} 元"
-        results.append(InlineQueryResultArticle(
-            id=uuid.uuid4().hex,
-            title="人民币价格",
-            description=cny_text,
-            input_message_content=InputTextMessageContent(cny_text)
-        ))
-        # RUB
-        rub_text = f"Цена в российских рублях: {rub:,.2f} ₽"
-        results.append(InlineQueryResultArticle(
-            id=uuid.uuid4().hex,
-            title="Российские рубли",
-            description=rub_text,
-            input_message_content=InputTextMessageContent(rub_text)
-        ))
+        results = [
+            InlineQueryResultArticle(
+                id=uuid.uuid4().hex,
+                title="USD Price",
+                description=usd_raw,
+                input_message_content=InputTextMessageContent(f"price 💵 : {usd_raw}")
+            ),
+            InlineQueryResultArticle(
+                id=uuid.uuid4().hex,
+                title="人民币价格",
+                description=f"价格：{cny:,.2f} 元",
+                input_message_content=InputTextMessageContent(f"价格：{cny:,.2f} 元")
+            ),
+            InlineQueryResultArticle(
+                id=uuid.uuid4().hex,
+                title="Российские рубли",
+                description=f"Цена в российских рублях: {rub:,.2f} ₽",
+                input_message_content=InputTextMessageContent(f"Цена в российских рублях: {rub:,.2f} ₽")
+            ),
+        ]
 
+        # cache_time=0 → always fetch fresh on each inline
         await update.inline_query.answer(results, cache_time=0)
     except Exception:
         await update.inline_query.answer([], cache_time=0)
@@ -137,6 +140,11 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("floor", floor_cmd))
     app.add_handler(InlineQueryHandler(inline_query))
-    # clean polling—no conflicts
-    app.bot.delete_webhook(drop_pending_updates=True)
-    app.run_polling(clean=True)
+
+    # ensure no webhook + flush pending updates
+    asyncio.get_event_loop().run_until_complete(
+        app.bot.delete_webhook(drop_pending_updates=True)
+    )
+
+    print("Bot started (polling)…")
+    app.run_polling()
