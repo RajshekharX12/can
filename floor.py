@@ -23,14 +23,14 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from dotenv import load_dotenv
 
-load_dotenv()  # loads BOT_TOKEN, optional overrides
+load_dotenv()
 
 BOT_TOKEN         = os.getenv("BOT_TOKEN")
 CHROME_BINARY     = os.getenv("CHROME_BINARY",     "/usr/bin/chromium-browser")
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
 
 def fetch_usd_price() -> str:
-    """Scrape fragment.com and return the USD price string, e.g. '~ $2,643'."""
+    """Scrape fragment.com for the USD price string (e.g. '~ $2,643')."""
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
@@ -42,60 +42,62 @@ def fetch_usd_price() -> str:
     driver = webdriver.Chrome(service=service, options=options)
     wait = WebDriverWait(driver, 15)
     try:
-        # 1) Load floor list and click first +888 item
         driver.get("https://fragment.com/numbers?filter=sale")
         link = wait.until(EC.presence_of_element_located(
             (By.XPATH, '//a[contains(@href,"/number/888")]')
         ))
         detail_url = link.get_attribute("href")
 
-        # 2) Go to detail page
         driver.get(detail_url)
         wait.until(EC.presence_of_element_located(
             (By.XPATH, '//*[contains(text(),"$")]')
         ))
 
-        # 3) Scan for the element containing "~ $"
         for el in driver.find_elements(By.XPATH, '//*[contains(text(),"$")]'):
-            txt = el.text.replace("\n", " ").strip()
-            if "~" in txt:
-                return txt
+            text = el.text.replace("\n", " ").strip()
+            if "~" in text:
+                return text
         return "N/A"
     finally:
         driver.quit()
 
 def convert_currency(amount: float, to: str) -> float:
-    """Try /latest first; if rate==0, fall back to /convert."""
-    # 1) latest rates
+    """Attempt /latest first (with debug), then fall back to /convert, else return 0.0."""
+    # 1) Try /latest
     try:
-        resp = requests.get(
-            "https://api.exchangerate.host/latest",
-            params={"base": "USD", "symbols": to},
-            timeout=5
-        )
-        resp.raise_for_status()
-        rate = resp.json().get("rates", {}).get(to, 0.0)
-        if rate > 0:
+        url = "https://api.exchangerate.host/latest"
+        params = {"base": "USD", "symbols": to}
+        print(f"[DEBUG] Fetching latest rate USD→{to} from {url} with {params}")
+        r = requests.get(url, params=params, timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        rate = data.get("rates", {}).get(to, 0.0)
+        print(f"[DEBUG] /latest response: {data}")
+        if rate and rate > 0:
             return amount * rate
-    except Exception:
-        pass
+        print(f"[DEBUG] /latest rate was zero or missing, falling back.")
+    except Exception as e:
+        print(f"[ERROR] /latest failed: {e}")
 
-    # 2) fallback convert endpoint
+    # 2) Fallback to /convert
     try:
-        resp = requests.get(
-            "https://api.exchangerate.host/convert",
-            params={"from": "USD", "to": to, "amount": amount},
-            timeout=5
-        )
-        resp.raise_for_status()
-        return resp.json().get("result", 0.0)
-    except Exception:
-        return 0.0
+        url2 = "https://api.exchangerate.host/convert"
+        params2 = {"from": "USD", "to": to, "amount": amount}
+        print(f"[DEBUG] Fetching converted amount via {url2} with {params2}")
+        r2 = requests.get(url2, params=params2, timeout=5)
+        r2.raise_for_status()
+        data2 = r2.json()
+        print(f"[DEBUG] /convert response: {data2}")
+        return data2.get("result", 0.0)
+    except Exception as e2:
+        print(f"[ERROR] /convert failed: {e2}")
+
+    return 0.0
 
 async def floor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔍 Fetching price…")
     try:
-        usd_raw = fetch_usd_price()  # e.g. "~ $2,643"
+        usd_raw = fetch_usd_price()
         await msg.edit_text(f"price 💵 : {usd_raw}")
     except Exception as e:
         await msg.edit_text(f"❌ Error: `{e}`", parse_mode=ParseMode.MARKDOWN)
@@ -103,12 +105,16 @@ async def floor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         usd_raw = fetch_usd_price()
-        match = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", usd_raw)
-        amt = float(match.group(1).replace(",", "")) if match else 0.0
+        m = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", usd_raw)
+        amt = float(m.group(1).replace(",", "")) if m else 0.0
 
-        # real-time conversions
-        cny = convert_currency(amt, "CNY")
-        rub = convert_currency(amt, "RUB")
+        # Real-time conversions
+        cny_val = convert_currency(amt, "CNY")
+        rub_val = convert_currency(amt, "RUB")
+
+        # Format or show N/A
+        cny_text = f"价格：{cny_val:,.2f} 元" if cny_val else "价格：N/A"
+        rub_text = f"Цена в российских рублях: {rub_val:,.2f} ₽" if rub_val else "Цена в российских рублях: N/A"
 
         results = [
             InlineQueryResultArticle(
@@ -120,20 +126,20 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineQueryResultArticle(
                 id=uuid.uuid4().hex,
                 title="人民币价格",
-                description=f"价格：{cny:,.2f} 元",
-                input_message_content=InputTextMessageContent(f"价格：{cny:,.2f} 元")
+                description=cny_text,
+                input_message_content=InputTextMessageContent(cny_text)
             ),
             InlineQueryResultArticle(
                 id=uuid.uuid4().hex,
                 title="Российские рубли",
-                description=f"Цена в российских рублях: {rub:,.2f} ₽",
-                input_message_content=InputTextMessageContent(f"Цена в российских рублях: {rub:,.2f} ₽")
+                description=rub_text,
+                input_message_content=InputTextMessageContent(rub_text)
             ),
         ]
 
-        # cache_time=0 → always fetch fresh on each inline
         await update.inline_query.answer(results, cache_time=0)
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] inline_query failed: {e}")
         await update.inline_query.answer([], cache_time=0)
 
 if __name__ == "__main__":
@@ -141,10 +147,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("floor", floor_cmd))
     app.add_handler(InlineQueryHandler(inline_query))
 
-    # ensure no webhook + flush pending updates
+    # clean start
     asyncio.get_event_loop().run_until_complete(
         app.bot.delete_webhook(drop_pending_updates=True)
     )
-
     print("Bot started (polling)…")
     app.run_polling()
