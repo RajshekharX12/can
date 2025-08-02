@@ -27,7 +27,7 @@ SOLD_URL = "https://fragment.com/numbers?sort=ending&filter=sold"
 
 def fetch_usd_prices():
     """
-    Clicks the first +888 on sale and sold pages, scrapes the USD sale price from each detail.
+    Clicks the first +888 on sale and sold pages, scrapes the USD price from each detail.
     Returns: (current_usd: float, sold_usd: float)
     """
     opts = Options()
@@ -39,30 +39,30 @@ def fetch_usd_prices():
     driver = webdriver.Chrome(service=Service(CHROMEDRIVER_PATH), options=opts)
     wait = WebDriverWait(driver, 15)
     try:
-        # 1) Sale → first number → detail → USD
+        # 1) Sale → detail
         driver.get(SALE_URL)
-        first_sale = wait.until(EC.element_to_be_clickable(
+        sale_link = wait.until(EC.element_to_be_clickable(
             (By.XPATH, '//a[contains(@href,"/number/888")]')
         ))
-        driver.get(first_sale.get_attribute("href"))
-        price_elem = wait.until(EC.presence_of_element_located(
+        driver.get(sale_link.get_attribute("href"))
+        sale_price_elem = wait.until(EC.presence_of_element_located(
             (By.XPATH, "//*[contains(text(),'~') and contains(text(),'$')]")
         ))
-        usd_raw = price_elem.text  # e.g. "~ $2,634"
-        m = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", usd_raw)
-        current_usd = float(m.group(1).replace(",", "")) if m else 0.0
+        sale_txt = sale_price_elem.text
+        m1 = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", sale_txt)
+        current_usd = float(m1.group(1).replace(",", "")) if m1 else 0.0
 
-        # 2) Sold → first sold → detail → USD
+        # 2) Sold → detail
         driver.get(SOLD_URL)
-        first_sold = wait.until(EC.element_to_be_clickable(
+        sold_link = wait.until(EC.element_to_be_clickable(
             (By.XPATH, '//a[contains(@href,"/number/888")]')
         ))
-        driver.get(first_sold.get_attribute("href"))
-        sold_elem = wait.until(EC.presence_of_element_located(
+        driver.get(sold_link.get_attribute("href"))
+        sold_price_elem = wait.until(EC.presence_of_element_located(
             (By.XPATH, "//*[contains(text(),'~') and contains(text(),'$')]")
         ))
-        sold_raw = sold_elem.text
-        m2 = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", sold_raw)
+        sold_txt = sold_price_elem.text
+        m2 = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", sold_txt)
         sold_usd = float(m2.group(1).replace(",", "")) if m2 else 0.0
 
         return current_usd, sold_usd
@@ -127,7 +127,6 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 input_message_content=InputTextMessageContent(rus)
             ),
         ]
-
         await update.inline_query.answer(results, cache_time=0)
     except:
         await update.inline_query.answer([], cache_time=0)
@@ -137,7 +136,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("floor", floor_cmd))
     app.add_handler(InlineQueryHandler(inline_query))
 
-    # clean start
     asyncio.get_event_loop().run_until_complete(
         app.bot.delete_webhook(drop_pending_updates=True)
     )
